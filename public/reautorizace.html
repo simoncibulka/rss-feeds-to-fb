@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Reautorizace</title>
+</head>
+<body>
+<h1>Reautorizace uživatele</h1>
+<button id="reauthorizeBtn">Reautorizovat</button>
+
+<script>
+    window.fbAsyncInit = function() {
+        FB.init({
+            appId: '2289710858046148', // ID vaší aplikace na Facebooku
+            cookie: true,
+            xfbml: true,
+            version: 'v21.0'
+        });
+    };
+
+    (function(d, s, id){
+        var js, fjs = d.getElementsByTagName(s)[0];
+        if (d.getElementById(id)) {return;}
+        js = d.createElement(s); js.id = id;
+        js.src = "https://connect.facebook.net/en_US/sdk.js";
+        fjs.parentNode.insertBefore(js, fjs);
+    }(document, 'script', 'facebook-jssdk'));
+
+    document.getElementById('reauthorizeBtn').onclick = function() {
+        FB.login(function(response) {
+            if (response.authResponse) {
+                // Úspěšná reautorizace, získání nového tokenu
+                const newShortUserAccessToken = response.authResponse.accessToken;
+                const facebookUserId = response.authResponse.userID;
+
+                // Volání backendového endpointu pro aktualizaci tokenů
+                fetch('/update-tokens', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        facebook_user_id: facebookUserId,
+                        new_short_user_access_token: newShortUserAccessToken
+                    })
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            alert('Reautorizace byla úspěšná a tokeny byly aktualizovány.');
+                        } else {
+                            alert('Něco se pokazilo. Zkuste to znovu.');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Chyba při volání backendu:', error);
+                        alert('Chyba při reautorizaci.');
+                    });
+            } else {
+                alert('Uživatel zamítl reautorizaci.');
+            }
+        }, { auth_type: 'reauthorize', scope: 'pages_show_list, pages_manage_posts, public_profile, pages_read_engagement' });
+    };
+</script>
+</body>
+</html>
+

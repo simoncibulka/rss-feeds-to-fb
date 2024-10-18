@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Facebook API Login</title>
+</head>
+<body>
+<h1>Připojte svůj RSS feed a Facebook účet</h1>
+<input type="text" id="rss-url" placeholder="Zadejte RSS URL" required>
+<button id="fb-login-btn">Připojit přes Facebook</button>
+
+<script>
+    // Facebook SDK
+    window.fbAsyncInit = function() {
+        FB.init({
+            appId: '2289710858046148', // Zadejte své Facebook App ID
+            cookie: true,
+            xfbml: true,
+            version: 'v21.0'
+        });
+    };
+
+    (function(d, s, id){
+        var js, fjs = d.getElementsByTagName(s)[0];
+        if (d.getElementById(id)) {return;}
+        js = d.createElement(s); js.id = id;
+        js.src = "https://connect.facebook.net/en_US/sdk.js";
+        fjs.parentNode.insertBefore(js, fjs);
+    }(document, 'script', 'facebook-jssdk'));
+
+    document.getElementById('fb-login-btn').addEventListener('click', function() {
+        const rssUrl = document.getElementById('rss-url').value;
+        if (!rssUrl) {
+            alert("Zadejte prosím URL RSS feedu.");
+            return;
+        }
+
+        // Facebook login
+        FB.login(function(response) {
+            if (response.authResponse) {
+                const accessToken = response.authResponse.accessToken;
+                const facebookUserId = response.authResponse.userID;
+
+                // Uložení do backendu
+                fetch('/save-user-data', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        rss_url: rssUrl,
+                        facebook_user_id: facebookUserId,
+                        short_user_access_token: accessToken
+                    })
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            alert('Uživatel a token úspěšně uložen!');
+                        } else {
+                            alert('Chyba při ukládání uživatele: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Chyba při ukládání dat:', error);
+                    });
+            } else {
+                alert("Nepodařilo se přihlásit k Facebooku.");
+            }
+        }, {scope: 'pages_show_list, pages_manage_posts, public_profile, pages_read_engagement'});
+    });
+</script>
+</body>
+</html>
