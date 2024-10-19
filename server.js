@@ -8,6 +8,7 @@ const axios = require('axios');
 const Parser = require('rss-parser');
 const FormData = require('form-data');
 const cheerio = require('cheerio');
+const { parse, addHours, isAfter } = require('date-fns');
 const parser = new Parser();
 const app = express();
 
@@ -258,30 +259,70 @@ async function postToFacebook(pageAccessToken, message, pageId) {
 }
 
 // Funkce pro zpracování RSS feedu a publikaci článků na Facebook
-async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
+async function processRSSFeed(rssUrl, pageAccessToken, pageId, facebookUserId) {
     try {
-        const feed = await parser.parseURL(rssUrl);  // Načtení RSS feedu
+        const domain = extractDomainFromRSSUrl(rssUrl);
+
+        // Získání created_at uživatele z databáze
+        const getUserCreatedAtQuery = `SELECT created_at FROM users WHERE facebook_user_id = ? LIMIT 1`;
+        const userCreatedAtResult = await new Promise((resolve, reject) => {
+            db.query(getUserCreatedAtQuery, [facebookUserId], (err, result) => {
+                if (err) {
+                    console.error(`[${formatDateTime()}] Chyba při získávání created_at pro uživatele:`, err);
+                    return reject(err);
+                }
+                resolve(result);
+            });
+        });
+
+        if (userCreatedAtResult.length === 0) {
+            console.error(`[${formatDateTime()}] Uživatel s facebook_user_id ${facebookUserId} nebyl nalezen.`);
+            return;
+        }
+
+        // Převedeme created_at na objekt Date a přidáme 2 hodiny
+        let userCreatedAt = new Date(userCreatedAtResult[0].created_at);
+        userCreatedAt = addHours(userCreatedAt, 2);
+
+        // Načtení RSS feedu
+        const feed = await parser.parseURL(rssUrl);
 
         for (const item of feed.items) {
             const title = item.title;
-            const description = cleanHTMLContent(item.content || item.contentSnippet || "Bez popisu");  // Vyčištění HTML obsahu
-            const guid = item.guid || item.link;
+            const description = cleanHTMLContent(item.content || item.contentSnippet);
+            const guid = item.guid || `${domain}${item.link}`;
+
+            let pubDate;
+            try {
+                // Převedeme pubDate pomocí date-fns a přidáme 2 hodiny
+                pubDate = parse(item.pubDate, 'EEE, dd MMM yyyy HH:mm:ss xx', new Date());
+                pubDate = addHours(pubDate, 2);
+                if (isNaN(pubDate)) {
+                    console.warn(`[${formatDateTime()}] Chyba při parsování pubDate pro článek "${title}". Datum přeskočeno.`);
+                    continue;
+                }
+
+                // Publikace pouze článků s novějším datem než datum registrace uživatele
+                if (!isAfter(pubDate, userCreatedAt)) {
+                    console.log(`[${formatDateTime()}] Článek "${title}" je starší než datum registrace uživatele (${domain}), přeskočeno.`);
+                    continue;
+                }
+            } catch (dateParseError) {
+                console.error(`[${formatDateTime()}] Chyba při parsování pubDate pro článek "${title}":`, dateParseError.message);
+                continue;
+            }
 
             // Kontrola, zda článek již nebyl publikován (podle GUID)
-            const checkQuery = `SELECT *
-                                FROM published_articles
-                                WHERE guid = ?`;
-
-            const result = await new Promise((resolve, reject) => {
+            const checkQuery = `SELECT * FROM published_articles WHERE guid = ?`;
+            await new Promise((resolve, reject) => {
                 db.query(checkQuery, [guid], async (err, result) => {
                     if (err) {
                         console.error(`[${formatDateTime()}] Chyba při kontrole publikovaného článku:`, err);
                         return reject(err);
                     }
-                    resolve(result);
 
                     if (result.length === 0) {
-                        // Zjistíme, zda článek obsahuje obrázek v enclosure nebo text formátu
+                        // Článek ještě nebyl publikován, můžeme pokračovat s publikací
                         let imageId = null;
                         let errorOccurred = false;
 
@@ -290,10 +331,10 @@ async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
                                 imageId = await uploadImageToFacebook(pageAccessToken, pageId, item.enclosure.url);
                             } catch (uploadError) {
                                 console.error(`[${formatDateTime()}] Chyba při nahrávání obrázku na Facebook:`, uploadError);
-                                errorOccurred = true;  // Pokud selže nahrávání obrázku, nastavíme chybu
+                                errorOccurred = true;
                             }
                         } else {
-                            // Extrahování obrázku z text formátu a složení finální URL
+                            // Extrahování obrázku z textového formátu a složení finální URL obrázku por nahrání
                             const imageSrc = constructImageUrlFromContent(item.content);
                             if (imageSrc) {
                                 try {
@@ -310,22 +351,36 @@ async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
 
                         // Pokud nedošlo k chybě při nahrávání obrázku nebo žádný obrázek není, pokračujeme
                         if (!errorOccurred) {
-                            if (imageId) {
-                                published = await postToFacebookWithImage(pageAccessToken, message, pageId, imageId);
-                            } else {
-                                published = await postToFacebook(pageAccessToken, message, pageId);
+                            try {
+                                if (imageId) {
+                                    published = await postToFacebookWithImage(pageAccessToken, message, pageId, imageId);
+                                } else {
+                                    published = await postToFacebook(pageAccessToken, message, pageId);
+                                }
+                            } catch (postError) {
+                                console.error(`[${formatDateTime()}] Chyba při publikaci článku "${title}":`, postError);
+                                return reject(postError);
                             }
 
                             if (published) {
                                 // Pokud publikace proběhla úspěšně, uložíme článek do databáze
-                                const insertQuery = `INSERT INTO published_articles (guid, pub_date)
-                                                     VALUES (?, ?)`;
-                                db.query(insertQuery, [guid, new Date()], (err, result) => {
-                                    if (err) {
-                                        console.error(`[${formatDateTime()}] Chyba při ukládání publikovaného článku do databáze:`, err);
-                                    } else {
+                                const insertQuery = `INSERT INTO published_articles (guid, pub_date, created_at) VALUES (?, ?, ?)`;
+
+                                // Převod `pubDate` na SQL formát DATETIME
+                                const formattedPubDate = pubDate.toISOString().slice(0, 19).replace('T', ' ');
+
+                                // Přidání aktuálního času pro `created_at`
+                                const createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+                                await new Promise((resolveInsert, rejectInsert) => {
+                                    db.query(insertQuery, [guid, formattedPubDate, createdAt], (insertErr) => {
+                                        if (insertErr) {
+                                            console.error(`[${formatDateTime()}] Chyba při ukládání publikovaného článku do databáze:`, insertErr);
+                                            return rejectInsert(insertErr);
+                                        }
                                         console.log(`[${formatDateTime()}] Článek "${title}" úspěšně uložen do databáze.`);
-                                    }
+                                        resolveInsert();
+                                    });
                                 });
                             } else {
                                 console.log(`[${formatDateTime()}] Publikace článku "${title}" selhala, článek nebyl uložen.`);
@@ -334,8 +389,10 @@ async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
                             console.log(`[${formatDateTime()}] Publikace článku "${title}" selhala kvůli chybě při nahrávání obrázku.`);
                         }
                     } else {
+                        // Pokud článek již existuje, přeskočíme publikaci
                         console.log(`[${formatDateTime()}] Článek "${title}" již byl publikován, přeskočeno.`);
                     }
+                    resolve();
                 });
             });
         }
@@ -451,8 +508,7 @@ cron.schedule('*/20 * * * * *', () => {
     console.log(`[${formatDateTime()}] CRON: Spouštím kontrolu a publikaci nových článků z RSS feedu...`);
 
     // Získáme uživatele z databáze, pro které publikujeme články
-    const query = `SELECT rss_url, page_access_token, facebook_page_id
-                   FROM users`;
+    const query = `SELECT rss_url, page_access_token, facebook_page_id, facebook_user_id FROM users`;
 
     db.query(query, (err, users) => {
         if (err) {
@@ -462,16 +518,17 @@ cron.schedule('*/20 * * * * *', () => {
 
         // Pro každého uživatele spustíme zpracování jeho RSS feedu
         users.forEach(user => {
-            // Zkontrolujeme, zda má uživatel platný RSS URL, access token a page ID
-            if (user.rss_url && user.page_access_token && user.facebook_page_id) {
+            // Zkontrolujeme, zda má uživatel platný RSS URL, access token, page ID a user ID
+            if (user.rss_url && user.page_access_token && user.facebook_page_id && user.facebook_user_id) {
                 console.log(`[${formatDateTime()}] Zpracovávám RSS feed pro uživatele: ${user.rss_url}`);
-                processRSSFeed(user.rss_url, user.page_access_token, user.facebook_page_id);
+                processRSSFeed(user.rss_url, user.page_access_token, user.facebook_page_id, user.facebook_user_id);
             } else {
                 console.log(`[${formatDateTime()}] Uživatel nemá platné údaje pro publikaci: ${user.rss_url}`);
             }
         });
     });
 });
+
 
 // Spuštění serveru
 app.listen(3000, () => {
