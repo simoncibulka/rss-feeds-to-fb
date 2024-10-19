@@ -21,20 +21,12 @@ const db = mysql.createConnection({
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME
 });
-
 db.connect((err) => {
     if (err) throw err;
     console.log(`[${formatDateTime()}] Připojeno k MySQL`);
 });
 
-// Funkce pro formátování aktuálního data a času s přidáním 2 hodin
-function formatDateTime() {
-    const now = new Date();
-    now.setHours(now.getHours() + 2); // Přidání 2 hodin
-    return now.toISOString().replace('T', ' ').substring(0, 19); // formát YYYY-MM-DD HH:MM:SS
-}
-
-// API pro ukládání uživatelských dat a získání long-lived page access tokenu
+// Endpoint pro ukládání uživatelských dat a získání long-lived page access tokenu
 app.post('/save-user-data', async (req, res) => {
     const {rss_url, facebook_user_id, short_user_access_token} = req.body;
 
@@ -67,12 +59,12 @@ app.post('/save-user-data', async (req, res) => {
             if (result.length > 0) {
                 // Aktualizujeme uživatele, pokud již existuje
                 const updateUserQuery = `UPDATE users
-                                         SET rss_url = ?,
+                                         SET rss_url                 = ?,
                                              short_user_access_token = ?,
-                                             long_user_access_token = ?,
-                                             page_access_token = ?,
-                                             facebook_page_id = ?,
-                                             data_access_expires_at = ?
+                                             long_user_access_token  = ?,
+                                             page_access_token       = ?,
+                                             facebook_page_id        = ?,
+                                             data_access_expires_at  = ?
                                          WHERE facebook_user_id = ?`;
                 db.query(updateUserQuery, userData, (err, result) => {
                     if (err) {
@@ -171,7 +163,7 @@ async function getPageAccessToken(longLivedUserToken) {
         const appSecret = process.env.APP_SECRET;
         const debugUrl = `https://graph.facebook.com/debug_token?input_token=${longLivedUserToken}&access_token=${appId}|${appSecret}`;
 
-        // Volání Facebook debug_token pro získání expirace
+        // Volání Facebook debug_token pro získání data expirace
         const debugResponse = await axios.get(debugUrl);
         const dataAccessExpiresAt = debugResponse.data.data.data_access_expires_at;
 
@@ -183,6 +175,7 @@ async function getPageAccessToken(longLivedUserToken) {
             const pageId = response.data.data[0].id;
 
             console.log(`[${formatDateTime()}] Page Access Token získán: ${pageAccessToken}`);
+            //data_access_expires_at se ukládá ve formánu unix timestampu, pro přečtení je potřeba ho převést na čitelné datum
             console.log(`[${formatDateTime()}] Data Access vyprší: ${new Date(dataAccessExpiresAt * 1000).toLocaleString()}`);
 
             return {pageAccessToken, pageId, dataAccessExpiresAt};
@@ -198,7 +191,7 @@ async function getPageAccessToken(longLivedUserToken) {
 // Funkce pro nahrání obrázku na Facebook stránku (bez publikování)
 async function uploadImageToFacebook(pageAccessToken, pageId, imageUrl) {
     try {
-        console.log('Nahrávám obrázek:', imageUrl);
+        console.log(`[${formatDateTime()}] Nahrávám obrázek:`, imageUrl);
 
         // Stáhneme obrázek pomocí axios
         const imageResponse = await axios({
@@ -209,7 +202,7 @@ async function uploadImageToFacebook(pageAccessToken, pageId, imageUrl) {
         // Vytvoříme formData pro nahrání obrázku
         const formData = new FormData();
         formData.append('source', imageResponse.data);
-        formData.append('published', 'false');  // Zajistí, že obrázek nebude automaticky publikován
+        formData.append('published', 'false');  // Zajistí, že obrázek nebude publikován
         formData.append('access_token', pageAccessToken);
 
         const uploadUrl = `https://graph.facebook.com/v12.0/${pageId}/photos`;
@@ -219,15 +212,15 @@ async function uploadImageToFacebook(pageAccessToken, pageId, imageUrl) {
             headers: formData.getHeaders()  // Nastaví správné hlavičky pro formData
         });
 
-        console.log('Obrázek úspěšně nahrán:', uploadResponse.data);
+        console.log(`[${formatDateTime()}] Obrázek úspěšně nahrán:`, uploadResponse.data);
         return uploadResponse.data.id; // Vrátíme ID nahraného obrázku
     } catch (error) {
-        console.error('Chyba při nahrávání obrázku na Facebook:', error.response ? error.response.data : error.message);
+        console.error(`[${formatDateTime()}] Chyba při nahrávání obrázku na Facebook:`, error.response ? error.response.data : error.message);
         return null;
     }
 }
 
-// Funkce pro publikaci příspěvku s nahraným obrázkem
+// Funkce pro publikaci příspěvku s obrázkem
 async function postToFacebookWithImage(pageAccessToken, message, pageId, imageId) {
     const url = `https://graph.facebook.com/v12.0/${pageId}/feed`;
     try {
@@ -238,15 +231,15 @@ async function postToFacebookWithImage(pageAccessToken, message, pageId, imageId
         };
 
         const response = await axios.post(url, postData);
-        console.log('Příspěvek s obrázkem úspěšně publikován:', response.data);
+        console.log(`[${formatDateTime()}] Příspěvek s obrázkem úspěšně publikován:`, response.data);
         return true;
     } catch (error) {
-        console.error('Chyba při publikování příspěvku s obrázkem:', error.response ? error.response.data : error.message);
+        console.error(`[${formatDateTime()}] Chyba při publikování příspěvku s obrázkem:`, error.response ? error.response.data : error.message);
         return false;
     }
 }
 
-// Funkce pro publikování článků na Facebook
+// Funkce pro publikování článků (bez obrázku) na Facebook
 async function postToFacebook(pageAccessToken, message, pageId) {
     const url = `https://graph.facebook.com/v12.0/${pageId}/feed`;
     try {
@@ -264,11 +257,6 @@ async function postToFacebook(pageAccessToken, message, pageId) {
     }
 }
 
-// Funkce pro odstranění HTML elementů z textu
-function stripHtmlTags(text) {
-    return text.replace(/<\/?[^>]+(>|$)/g, "");
-}
-
 // Funkce pro zpracování RSS feedu a publikaci článků na Facebook
 async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
     try {
@@ -277,10 +265,12 @@ async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
         for (const item of feed.items) {
             const title = item.title;
             const description = cleanHTMLContent(item.content || item.contentSnippet || "Bez popisu");  // Vyčištění HTML obsahu
-            const guid = item.guid || item.link;  // Použití GUID, pokud není, tak link
+            const guid = item.guid || item.link;
 
             // Kontrola, zda článek již nebyl publikován (podle GUID)
-            const checkQuery = `SELECT * FROM published_articles WHERE guid = ? LIMIT 1`;
+            const checkQuery = `SELECT *
+                                FROM published_articles
+                                WHERE guid = ?`;
 
             const result = await new Promise((resolve, reject) => {
                 db.query(checkQuery, [guid], async (err, result) => {
@@ -291,7 +281,7 @@ async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
                     resolve(result);
 
                     if (result.length === 0) {
-                        // Zjistíme, zda článek obsahuje obrázek v enclosure nebo speciálním formátu
+                        // Zjistíme, zda článek obsahuje obrázek v enclosure nebo text formátu
                         let imageId = null;
                         let errorOccurred = false;
 
@@ -303,7 +293,7 @@ async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
                                 errorOccurred = true;  // Pokud selže nahrávání obrázku, nastavíme chybu
                             }
                         } else {
-                            // Extrahování obrázku ze speciálního formátu a složení finální URL
+                            // Extrahování obrázku z text formátu a složení finální URL
                             const imageSrc = constructImageUrlFromContent(item.content);
                             if (imageSrc) {
                                 try {
@@ -328,7 +318,8 @@ async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
 
                             if (published) {
                                 // Pokud publikace proběhla úspěšně, uložíme článek do databáze
-                                const insertQuery = `INSERT INTO published_articles (guid, pub_date) VALUES (?, ?)`;
+                                const insertQuery = `INSERT INTO published_articles (guid, pub_date)
+                                                     VALUES (?, ?)`;
                                 db.query(insertQuery, [guid, new Date()], (err, result) => {
                                     if (err) {
                                         console.error(`[${formatDateTime()}] Chyba při ukládání publikovaného článku do databáze:`, err);
@@ -353,7 +344,7 @@ async function processRSSFeed(rssUrl, pageAccessToken, pageId) {
     }
 }
 
-// Funkce pro extrakci hodnot nid a oid z obsahu a sestavení URL
+// Funkce pro extrakci hodnot nid a oid z obsahu a sestavení URL obrázku
 function constructImageUrlFromContent(content) {
     const nidMatch = content.match(/nid=(\d+)/);
     const oidMatch = content.match(/oid=(\d+)/);
@@ -364,7 +355,7 @@ function constructImageUrlFromContent(content) {
         return `https://cibulka-demo.antee.cz/file.php?nid=${nid}&oid=${oid}`;
     }
 
-    return null;  // Pokud hodnoty nenajdeme, vrátíme null
+    return null;
 }
 
 // Funkce pro čištění HTML obsahu, ponechává pouze text a obrázky
@@ -382,54 +373,22 @@ function cleanHTMLContent(content) {
         }
     });
 
-    // Nahrazení `&nbsp;` a dalších entit
+    // Nahrazení `&nbsp;` a dalších
     let cleanText = $.html();
     cleanText = cleanText.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
 
     return cleanText;
 }
 
-
-// Spuštění serveru
-app.listen(3000, () => {
-    console.log(`[${formatDateTime()}] Server běží na http://localhost:3000`);
-});
+// Funkce pro formátování aktuálního data a času s přidáním 2 hodin
+function formatDateTime() {
+    const now = new Date();
+    now.setHours(now.getHours() + 2); // Přidání 2 hodin
+    return now.toISOString().replace('T', ' ').substring(0, 19); // formát YYYY-MM-DD HH:MM:SS
+}
 
 app.get('/reautorizace', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'reautorizace.html'));
-});
-
-// Cron pro kontrolu expirace data_access_expires_at
-cron.schedule('*/20 * * * * *', () => {
-    console.log(`[${formatDateTime()}] CRON: Kontrola expirace data_access_expires_at...`);
-    checkDataAccessExpiration();
-});
-
-// Cron pro zpracování RSS feedu a publikaci článků každých 10 minut
-cron.schedule('*/20 * * * * *', () => {
-    console.log(`[${formatDateTime()}] CRON: Spouštím kontrolu a publikaci nových článků z RSS feedu...`);
-
-    // Získáme uživatele z databáze, pro které publikujeme články
-    const query = `SELECT rss_url, page_access_token, facebook_page_id
-                   FROM users`;
-
-    db.query(query, (err, users) => {
-        if (err) {
-            console.error(`[${formatDateTime()}] Chyba při načítání uživatelů z databáze:`, err);
-            return;
-        }
-
-        // Pro každého uživatele spustíme zpracování jeho RSS feedu
-        users.forEach(user => {
-            // Zkontrolujeme, zda má uživatel platný RSS URL, access token a page ID
-            if (user.rss_url && user.page_access_token && user.facebook_page_id) {
-                console.log(`[${formatDateTime()}] Zpracovávám RSS feed pro uživatele: ${user.rss_url}`);
-                processRSSFeed(user.rss_url, user.page_access_token, user.facebook_page_id);
-            } else {
-                console.log(`[${formatDateTime()}] Uživatel nemá platné údaje pro publikaci: ${user.rss_url}`);
-            }
-        });
-    });
 });
 
 
@@ -459,7 +418,7 @@ function checkDataAccessExpiration() {
         }
 
         const currentTime = Math.floor(Date.now() / 1000); // Aktuální čas v UNIX timestampu
-        const daysBeforeExpiration = 10; // Počet dní před expirací, kdy chcete upozornit uživatele
+        const daysBeforeExpiration = 10; // Počet dní před expirací, kdy upozornit uživatele
         const timeBeforeExpiration = currentTime + (daysBeforeExpiration * 24 * 60 * 60); // Počet sekund před expirací
 
         for (const user of users) {
@@ -470,12 +429,51 @@ function checkDataAccessExpiration() {
                 //const reauthorizeUrl = `http://${domain}/reautorizace`;
 
                 console.log(`[${formatDateTime()}] Data Access pro uživatele - ${domain}, vyprší za méně než ${daysBeforeExpiration} dní.`);
+                //tady odkaz na reakutorizaci upravit do formátu http://${domain}/reautorizace
                 console.log(`[${formatDateTime()}] Klikněte zde pro reautorizaci uživatele - ${domain}: http://localhost:3000/reautorizace?user_id=${user.facebook_user_id}`);
 
                 // Zde by se mohla poslat uživateli notifikace na email (nodemailer) a skrz odkaz by ho to přesměrovalo na reakutorizaci
                 //potřeba uložit email do DB, lze ziskat z prvotního prihlaseni, url reautorizace by se dala ziskat tak,
-                // že by se z url rss feedu vzala domena a pridal by se k ni odkaz na reautorizaci
+                // že by se z url rss feedu vzala domena a pridal by se k ni odkaz na reautorizaci viz zakomentovana promenna reauthorizeUrl
             }
         }
     });
 }
+
+// Cron pro kontrolu expirace data_access_expires_at
+cron.schedule('*/20 * * * * *', () => {
+    console.log(`[${formatDateTime()}] CRON: Kontrola expirace data_access_expires_at...`);
+    checkDataAccessExpiration();
+});
+
+// Cron pro zpracování RSS feedu a publikaci článků
+cron.schedule('*/20 * * * * *', () => {
+    console.log(`[${formatDateTime()}] CRON: Spouštím kontrolu a publikaci nových článků z RSS feedu...`);
+
+    // Získáme uživatele z databáze, pro které publikujeme články
+    const query = `SELECT rss_url, page_access_token, facebook_page_id
+                   FROM users`;
+
+    db.query(query, (err, users) => {
+        if (err) {
+            console.error(`[${formatDateTime()}] Chyba při načítání uživatelů z databáze:`, err);
+            return;
+        }
+
+        // Pro každého uživatele spustíme zpracování jeho RSS feedu
+        users.forEach(user => {
+            // Zkontrolujeme, zda má uživatel platný RSS URL, access token a page ID
+            if (user.rss_url && user.page_access_token && user.facebook_page_id) {
+                console.log(`[${formatDateTime()}] Zpracovávám RSS feed pro uživatele: ${user.rss_url}`);
+                processRSSFeed(user.rss_url, user.page_access_token, user.facebook_page_id);
+            } else {
+                console.log(`[${formatDateTime()}] Uživatel nemá platné údaje pro publikaci: ${user.rss_url}`);
+            }
+        });
+    });
+});
+
+// Spuštění serveru
+app.listen(3000, () => {
+    console.log(`[${formatDateTime()}] Server běží na http://localhost:3000`);
+});
